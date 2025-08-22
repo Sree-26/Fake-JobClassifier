@@ -1,0 +1,300 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.preprocessing import LabelEncoder
+import pickle
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+import warnings
+warnings.filterwarnings('ignore')
+
+# Download required NLTK data
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
+
+class FakeJobClassifier:
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
+        self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.le_company = LabelEncoder()
+        self.le_location = LabelEncoder()
+        
+    def preprocess_text(self, text):
+        """Clean and preprocess text data"""
+        if pd.isna(text):
+            return ""
+        
+        # Convert to lowercase
+        text = str(text).lower()
+        
+        # Remove special characters and digits
+        text = re.sub(r'[^a-zA-Z\s]', '', text)
+        
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        
+        return text
+    
+    def extract_features(self, df):
+        """Extract features from the dataset"""
+        features = df.copy()
+        
+        # Text length features
+        features['title_length'] = df['title'].fillna('').str.len()
+        features['description_length'] = df['description'].fillna('').str.len()
+        features['requirements_length'] = df['requirements'].fillna('').str.len()
+        features['benefits_length'] = df['benefits'].fillna('').str.len()
+        
+        # Word count features
+        features['title_word_count'] = df['title'].fillna('').str.split().str.len()
+        features['description_word_count'] = df['description'].fillna('').str.split().str.len()
+        
+        # Suspicious patterns
+        features['has_telecommuting'] = df['telecommuting'].fillna(0)
+        features['has_company_logo'] = df['has_company_logo'].fillna(0)
+        features['has_questions'] = df['has_questions'].fillna(0)
+        
+        # Salary-related features
+        features['salary_range_missing'] = df['salary_range'].isna().astype(int)
+        
+        # Employment type encoding
+        employment_types = ['Full-time', 'Part-time', 'Contract', 'Temporary', 'Other']
+        for emp_type in employment_types:
+            features[f'employment_{emp_type.lower().replace("-", "_")}'] = (
+                df['employment_type'].fillna('').str.contains(emp_type, case=False, na=False).astype(int)
+            )
+        
+        return features
+    
+    def prepare_data(self, df):
+        """Prepare data for training"""
+        # Extract features
+        features_df = self.extract_features(df)
+        
+        # Combine text fields
+        combined_text = (
+            df['title'].fillna('') + ' ' +
+            df['description'].fillna('') + ' ' +
+            df['requirements'].fillna('') + ' ' +
+            df['benefits'].fillna('')
+        )
+        
+        # Preprocess combined text
+        processed_text = combined_text.apply(self.preprocess_text)
+        
+        # Vectorize text
+        text_features = self.vectorizer.fit_transform(processed_text)
+        
+        # Select numerical features
+        numerical_features = [
+            'title_length', 'description_length', 'requirements_length', 'benefits_length',
+            'title_word_count', 'description_word_count',
+            'has_telecommuting', 'has_company_logo', 'has_questions',
+            'salary_range_missing',
+            'employment_full_time', 'employment_part_time', 'employment_contract',
+            'employment_temporary', 'employment_other'
+        ]
+        
+        # Combine features
+        X_numerical = features_df[numerical_features].fillna(0).values
+        X_combined = np.hstack([text_features.toarray(), X_numerical])
+        
+        return X_combined, processed_text
+    
+    def train(self, df, target_column='fraudulent'):
+        """Train the model"""
+        X, processed_text = self.prepare_data(df)
+        y = df[target_column].values
+        
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Train the model
+        self.model.fit(X_train, y_train)
+        
+        # Make predictions
+        y_pred = self.model.predict(X_test)
+        
+        # Print evaluation metrics
+        print("Model Performance:")
+        print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+        print("\nClassification Report:")
+        print(classification_report(y_test, y_pred))
+        print("\nConfusion Matrix:")
+        print(confusion_matrix(y_test, y_pred))
+        
+        return X_test, y_test, y_pred
+    
+    def predict(self, job_data):
+        """Predict if a job is fake or not"""
+        # Convert single job to DataFrame
+        if isinstance(job_data, dict):
+            df = pd.DataFrame([job_data])
+        else:
+            df = job_data
+        
+        # Prepare data
+        X, _ = self.prepare_data(df)
+        
+        # Make prediction
+        prediction = self.model.predict(X)
+        probability = self.model.predict_proba(X)
+        
+        return prediction, probability
+    
+    def save_model(self, filename='fake_job_classifier.pkl'):
+        """Save the trained model"""
+        model_data = {
+            'model': self.model,
+            'vectorizer': self.vectorizer,
+            'le_company': self.le_company,
+            'le_location': self.le_location
+        }
+        
+        with open(filename, 'wb') as f:
+            pickle.dump(model_data, f)
+        
+        print(f"Model saved as {filename}")
+    
+    def load_model(self, filename='fake_job_classifier.pkl'):
+        """Load a trained model"""
+        with open(filename, 'rb') as f:
+            model_data = pickle.load(f)
+        
+        self.model = model_data['model']
+        self.vectorizer = model_data['vectorizer']
+        self.le_company = model_data['le_company']
+        self.le_location = model_data['le_location']
+        
+        print(f"Model loaded from {filename}")
+
+# Function to create sample data for demonstration
+def create_sample_data():
+    """Create sample data for demonstration"""
+    
+    # Sample legitimate jobs
+    legitimate_jobs = [
+        {
+            'title': 'Software Engineer',
+            'company': 'Tech Corp',
+            'location': 'San Francisco, CA',
+            'description': 'We are looking for a talented software engineer to join our team. You will be working on cutting-edge technologies and building scalable applications.',
+            'requirements': 'Bachelor degree in Computer Science, 3+ years experience in Python, Strong problem-solving skills',
+            'benefits': 'Health insurance, 401k, Flexible hours, Remote work options',
+            'telecommuting': 1,
+            'has_company_logo': 1,
+            'has_questions': 1,
+            'employment_type': 'Full-time',
+            'salary_range': '$80,000-$120,000',
+            'fraudulent': 0
+        },
+        {
+            'title': 'Data Analyst',
+            'company': 'Analytics Inc',
+            'location': 'New York, NY',
+            'description': 'Join our data team to analyze business metrics and provide insights that drive decision making.',
+            'requirements': 'Experience with SQL, Python, Excel. Statistical analysis background preferred.',
+            'benefits': 'Competitive salary, Health benefits, Professional development',
+            'telecommuting': 0,
+            'has_company_logo': 1,
+            'has_questions': 1,
+            'employment_type': 'Full-time',
+            'salary_range': '$60,000-$85,000',
+            'fraudulent': 0
+        }
+    ]
+    
+    # Sample fake jobs
+    fake_jobs = [
+        {
+            'title': 'Easy Work From Home - Earn $5000/week',
+            'company': 'Quick Money LLC',
+            'location': '',
+            'description': 'Make money fast! No experience needed. Work from home and earn thousands per week with minimal effort.',
+            'requirements': 'None! Anyone can do this job.',
+            'benefits': 'Unlimited earning potential, Work whenever you want, No boss',
+            'telecommuting': 1,
+            'has_company_logo': 0,
+            'has_questions': 0,
+            'employment_type': '',
+            'salary_range': '',
+            'fraudulent': 1
+        },
+        {
+            'title': 'Mystery Shopper',
+            'company': '',
+            'location': 'Various',
+            'description': 'Shop at stores and get paid! Evaluate customer service and get reimbursed plus payment.',
+            'requirements': 'Must have reliable transportation and smartphone',
+            'benefits': 'Flexible schedule, Get paid to shop, Reimbursement for purchases',
+            'telecommuting': 1,
+            'has_company_logo': 0,
+            'has_questions': 0,
+            'employment_type': 'Part-time',
+            'salary_range': '$500-$2000/week',
+            'fraudulent': 1
+        }
+    ]
+    
+    # Create more samples by varying the existing ones
+    all_jobs = legitimate_jobs * 50 + fake_jobs * 50
+    
+    # Add some noise to make it more realistic
+    for i, job in enumerate(all_jobs):
+        if i % 10 == 0:  # Add some variation
+            if job['fraudulent'] == 0:  # Legitimate job
+                job['title'] = f"{job['title']} - {['Senior', 'Junior', 'Mid-level'][i % 3]}"
+            else:  # Fake job
+                job['title'] = f"{job['title']} - {['URGENT', 'IMMEDIATE START', 'HIGH PAY'][i % 3]}"
+    
+    return pd.DataFrame(all_jobs)
+
+# Example usage
+if __name__ == "__main__":
+    # Create sample dataset
+    print("Creating sample dataset...")
+    df = create_sample_data()
+    print(f"Dataset created with {len(df)} samples")
+    print(f"Legitimate jobs: {len(df[df['fraudulent'] == 0])}")
+    print(f"Fake jobs: {len(df[df['fraudulent'] == 1])}")
+    
+    # Initialize and train the classifier
+    print("\nTraining the classifier...")
+    classifier = FakeJobClassifier()
+    X_test, y_test, y_pred = classifier.train(df)
+    
+    # Save the model
+    classifier.save_model('fake_job_classifier.pkl')
+    
+    # Test prediction on a new job
+    print("\nTesting prediction on a new job...")
+    test_job = {
+        'title': 'Work from home - Make $3000/week',
+        'company': '',
+        'location': 'Remote',
+        'description': 'Easy money! No skills required. Just follow simple instructions.',
+        'requirements': 'None',
+        'benefits': 'High pay, Flexible hours',
+        'telecommuting': 1,
+        'has_company_logo': 0,
+        'has_questions': 0,
+        'employment_type': '',
+        'salary_range': '',
+        'fraudulent': None  # This is what we want to predict
+    }
+    
+    prediction, probability = classifier.predict(test_job)
+    print(f"Prediction: {'Fake' if prediction[0] == 1 else 'Legitimate'}")
+    print(f"Confidence: {max(probability[0]):.4f}")
